@@ -1,99 +1,59 @@
-import logging
-import yt_dlp
-from telegram import Update, InlineQueryResultArticle, InputTextMessageContent
-from telegram.ext import Updater, CommandHandler, InlineQueryHandler, CallbackContext, CallbackQueryHandler
+from telegram import InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, Update
+from telegram.ext import ApplicationBuilder, InlineQueryHandler, CallbackQueryHandler, ContextTypes
+from uuid import uuid4
+from config import BOT_TOKEN
+from inline_search import search_youtube
+from downloader import download_video
+import os
 
-# Set up logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.inline_query.query
+    results = []
 
-# Define your bot token
-TOKEN = 'YOUR_BOT_TOKEN'  # Replace with your bot token
+    for video in search_youtube(query):
+        results.append(
+            InlineQueryResultArticle(
+                id=str(uuid4()),
+                title=video["title"],
+                input_message_content=InputTextMessageContent(f"{video['title']}\n{video['url']}"),
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("144p", callback_data=f"dl|{video['url']}|144"),
+                        InlineKeyboardButton("360p", callback_data=f"dl|{video['url']}|360"),
+                        InlineKeyboardButton("480p", callback_data=f"dl|{video['url']}|480"),
+                    ],
+                    [
+                        InlineKeyboardButton("MP3 128kbps", callback_data=f"dl|{video['url']}|mp3128"),
+                        InlineKeyboardButton("MP3 320kbps", callback_data=f"dl|{video['url']}|mp3320"),
+                    ]
+                ])
+            )
+        )
 
-def start(update: Update, context: CallbackContext) -> None:
-    update.message.reply_text('Hello! Use inline mode to search for YouTube videos.')
+    await update.inline_query.answer(results)
 
-def search_youtube(update: Update, context: CallbackContext) -> None:
-    query = ' '.join(context.args)
-    if not query:
-        update.message.reply_text('Please provide a search query.')
-        return
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-    ydl_opts = {
-        'format': 'bestvideo+bestaudio/best',
-        'noplaylist': True,
-        'quiet': True,
-    }
+    _, url, quality = query.data.split("|")
+    await query.edit_message_text(f"⏬ Downloading `{quality}` from YouTube...", parse_mode="Markdown")
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        try:
-            info_dict = ydl.extract_info(f"ytsearch:{query}", download=False)
-            results = info_dict['entries']
-            results_list = []
+    file_path = download_video(url, quality)
 
-            for entry in results[:5]:  # Limit to 5 results
-                video_url = entry['url']
-                title = entry['title']
-                video_id = entry['id']
+    if quality.startswith("mp3"):
+        await query.message.reply_audio(audio=open(file_path, "rb"), title=os.path.basename(file_path))
+    else:
+        await query.message.reply_video(video=open(file_path, "rb"), caption=os.path.basename(file_path))
 
-                # Create inline query results with download options
-                results_list.append(InlineQueryResultArticle(
-                    id=video_id,
-                    title=title,
-                    input_message_content=InputTextMessageContent(f"Download options for: {title}"),
-                    description="Click to download in various qualities.",
-                    thumb_url=entry['thumbnail'],
-                    reply_markup={
-                        "inline_keyboard": [
-                            [
-                                {"text": "144p", "callback_data": f"download:{video_url}:144p"},
-                                {"text": "360p", "callback_data": f"download:{video_url}:360p"},
-                                {"text": "480p", "callback_data": f"download:{video_url}:480p"},
-                                {"text": "MP3", "callback_data": f"download:{video_url}:mp3"},
-                            ]
-                        ]
-                    }
-                ))
+    os.remove(file_path)  # Clean up
 
-            update.inline_query.answer(results_list)
-        except Exception as e:
-            update.message.reply_text(f"An error occurred: {str(e)}")
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(InlineQueryHandler(inline_query_handler))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    print("Bot is running...")
+    app.run_polling()
 
-def download_video(update: Update, context: CallbackContext) -> None:
-    query = update.callback_query.data
-    _, url, quality = query.split(':')
-
-    ydl_opts = {
-        'format': quality if quality != 'mp3' else 'bestaudio/best',
-        'outtmpl': '%(title)s.%(ext)s',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }] if quality == 'mp3' else [],
-        'quiet': True,
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        try:
-            ydl.download([url])
-            update.callback_query.answer('Download completed!')
-        except Exception as e:
-            update.callback_query.answer(f"An error occurred: {str(e)}")
-
-def main() -> None:
-    updater = Updater(TOKEN)
-
-    # Get the dispatcher to register handlers
-    dispatcher = updater.dispatcher
-
-    # Register command and inline query handlers
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(InlineQueryHandler(search_youtube))
-    dispatcher.add_handler(CallbackQueryHandler(download_video))
-
-    # Start the Bot
-    updater.start_polling()
-    updater.idle()
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
